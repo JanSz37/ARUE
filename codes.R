@@ -20,6 +20,8 @@ extract_row <- function(row) {
 }
 
 
+
+
 #tbus
 tbus_values <- tbus_data$result$values
 
@@ -115,6 +117,141 @@ ggplot(properties_warsaw, aes(x = min_distance, y = price/squareMeters)) +
 correlation <- cor(properties_warsaw$min_distance, as.numeric(properties_warsaw$price)/properties_warsaw$squareMeters, method = "pearson")
 print(paste("Correlation between distance and price:", correlation)) #there is *some* correlation
 
-model <- lm(price/squareMeters ~ min_distance, data = properties_warsaw) #significant model, it does kind prove our thesis as is
+
+
+###modeling
+
+library(corrplot)
+cor(properties_warsaw[is.numeric(properties_warsaw)])
+
+model <- lm(price ~ min_distance + squareMeters, data = properties_warsaw) #significant model, it does kind prove our thesis as is
 summary(model)
 # but lets improve this. If you have any ideas, feel free to share!
+
+
+
+#####examining the density of properties in different districts
+# Create points from properties data
+properties_sf <- st_as_sf(properties_warsaw, 
+                          coords = c("longitude", "latitude"), 
+                          crs = 4326)
+
+# Transform to the same CRS as warsaw_districts if needed
+# Assuming warsaw_districts is in EPSG:2178 (common for Poland)
+properties_sf <- st_transform(properties_sf, st_crs(warsaw_districts))
+
+# Count properties per district
+properties_per_district <- properties_sf %>%
+  st_join(warsaw_districts) %>%
+  group_by(nazwa_dzie) %>%
+  summarise(property_count = n()) %>%
+  st_drop_geometry()
+
+# Calculate area of each district in square kilometers
+districts_with_area <- warsaw_districts %>%
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1000000)
+
+# Join counts with districts and calculate density
+districts_with_density <- districts_with_area %>%
+  left_join(properties_per_district, by = "nazwa_dzie") %>%
+  mutate(density = property_count / area_km2)
+
+# Create the map
+ggplot(districts_with_density) +
+  geom_sf(aes(fill = density), color = "white") +
+  scale_fill_viridis_c(
+    name = "Properties per km²",
+    option = "plasma",
+    direction = -1
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Property Density in Warsaw Districts",
+    subtitle = "Number of properties per square kilometer"
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.text = element_text(size = 8)
+  )
+
+# Print summary statistics
+summary_stats <- districts_with_density %>%
+  st_drop_geometry() %>%
+  select(nazwa_dzie, property_count, area_km2, density) %>%
+  arrange(desc(density))
+print(summary_stats)
+#########################################
+
+########examining correlations##################
+
+# Select only numeric columns
+numeric_data <- properties_warsaw %>%
+  select(where(is.numeric)) %>%
+  # Remove any columns that are all NA or have zero variance
+  select_if(function(x) !all(is.na(x)) && var(x, na.rm = TRUE) > 0)
+
+# Calculate correlation matrix
+cor_matrix <- cor(numeric_data, use = "pairwise.complete.obs")
+
+# Create correlation plot
+corrplot(cor_matrix, 
+         method = "color",
+         type = "upper",
+         order = "hclust",
+         addCoef.col = "black",
+         tl.col = "black",
+         tl.srt = 45,
+         number.cex = 0.7,
+         tl.cex = 0.7,
+         diag = FALSE)
+
+# Function to create scatter plots for highly correlated pairs
+create_scatter_plots <- function(cor_matrix, threshold = 0.3) {
+  # Get pairs of variables with correlation above threshold
+  cor_pairs <- which(abs(cor_matrix) > threshold & upper.tri(cor_matrix), arr.ind = TRUE)
+  
+  # Create data frame of correlation pairs
+  pairs_df <- data.frame(
+    var1 = rownames(cor_matrix)[cor_pairs[,1]],
+    var2 = colnames(cor_matrix)[cor_pairs[,2]],
+    correlation = cor_matrix[cor_pairs]
+  ) %>%
+    arrange(desc(abs(correlation)))
+  
+  # Print top correlations
+  print("Top correlations:")
+  print(pairs_df)
+  
+  # Create scatter plots for top 5 correlations
+  top_5_pairs <- head(pairs_df, 5)
+  
+  plots <- list()
+  for(i in 1:nrow(top_5_pairs)) {
+    pair <- top_5_pairs[i,]
+    plot <- ggplot(numeric_data, aes_string(x = pair$var1, y = pair$var2)) +
+      geom_point(alpha = 0.1) +
+      geom_smooth(method = "lm", color = "red") +
+      labs(title = sprintf("Correlation: %.2f", pair$correlation)) +
+      theme_minimal() +
+      theme(plot.title = element_text(size = 10))
+    plots[[i]] <- plot
+  }
+  
+  # Arrange plots in a grid
+  gridExtra::grid.arrange(grobs = plots, ncol = 2)
+}
+
+# Create scatter plots for highly correlated variables
+create_scatter_plots(cor_matrix, threshold = 0.3)
+
+# Calculate summary statistics for price correlations
+price_correlations <- data.frame(
+  variable = names(numeric_data),
+  correlation_with_price = cor(numeric_data$price, numeric_data, use = "pairwise.complete.obs")
+) %>%
+  arrange(desc(abs(correlation_with_price.price)))  # Note the .price suffix
+
+# Print price correlations
+print("Correlations with price:")
+print(price_correlations)

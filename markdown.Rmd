@@ -1,0 +1,42 @@
+---
+title: "Hedonic model on property prices and proximity to transport"
+author: "Jan Szczepanek, Anastasia Sviridova"
+date: "2025-01-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+## Problem description
+
+## Data sources
+
+This study uses the following data:
+
+* Apartment Prices in Poland by Krzysztof Jamroz (June 2024) [link on Kaggle](https://www.kaggle.com/datasets/krzysztofjamroz/apartment-prices-in-poland/data)
+* Public Transport Stops from the Otwarte Dane initiative led by the Warsaw City Hall [link to the initative](https://api.um.warszawa.pl/)
+* Metro Station Exits from the Otwarte Dane initiative led by the Warsaw City Hall 
+* Warsaw Districts shape file (we need to find the source or just not use that one)
+
+## Techniques used
+
+# Data preparation
+
+## Exploratory data analysis
+
+# Modeling
+
+## Correlation analysis
+
+## Component selection
+
+## Feature engineering
+
+## Model analysis
+
+#Conclusions
+
