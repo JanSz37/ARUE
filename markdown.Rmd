@@ -11,7 +11,27 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # Introduction
 
-## Problem description
+The relationship between property prices and proximity to public transport is a well-documented phenomenon in urban studies. Properties located near public transport hubs often command higher prices due to the convenience and accessibility they offer. Understanding this relationship can provide valuable insights for real estate investors, urban planners, and policymakers.
+
+This project aims to explore the correlation between property prices and public transport proximity in Warsaw, Poland. By leveraging spatial data analysis techniques, we will:
+
+* Measure Proximity to Public Transport: Calculate the distance from each property to the nearest public transport point.
+
+* Evaluate the Impact on Property Prices: Analyze how proximity to public transport influences property prices.
+
+## Our objectives
+
+* Data Collection and Preparation: Gather and preprocess data on property prices and public transport locations in Warsaw.
+
+* Proximity Analysis: Calculate the distance from each property to the nearest public transport point.
+
+* Clustering: Extend the distance with public transport point analysis /w weights.
+
+* Correlation Analysis: Examine the relationship between property prices and public transport proximity.
+
+* Modeling: Develop a regression model to examine the relation between the two main factors.
+
+* Visualization: Visualize the results to identify patterns and trends.
 
 ## Data sources
 
@@ -22,9 +42,187 @@ This study uses the following data:
 * Metro Station Exits from the Otwarte Dane initiative led by the Warsaw City Hall 
 * Warsaw Districts shape file (we need to find the source or just not use that one)
 
-## Techniques used
+## Pakcages used
+
+```{r}
+# sf: For handling spatial data and performing geometric operations
+library(sf)
+
+# jsonlite: For reading JSON files (e.g., public transport data)
+library(jsonlite)
+
+# dplyr: For data manipulation and transformation
+library(dplyr)
+
+# ggplot2: For creating visualizations and plots
+library(ggplot2)
+
+# tmap: For thematic mapping and spatial data visualization
+library(tmap)
+
+# tidyr: For reshaping and tidying data
+library(tidyr)
+
+# geosphere: For calculating geographic distances (e.g., Haversine distance)
+library(geosphere)
+
+# corrplot: For visualizing correlation matrices
+library(corrplot)
+
+# gridExtra: For arranging multiple plots in a grid
+library(gridExtra)
+```
 
 # Data preparation
+
+```{r}
+warsaw_districts <- st_read("dzielnice_Warszawy.shp") #for viz
+
+tbus_data <- fromJSON("bus_tram_stops.customization") #self expanatory
+
+metro_data <- fromJSON("metro_stops.customization") #same as above
+
+properties1 <- read.csv('apartments_pl_2024_06.csv') #apartment prices with geolocation
+```
+
+The first step involves loading and cleaning the public transport data, including bus/tram stops and metro stations. The data is transformed into a consistent format for further analysis.
+
+```{r}
+tbus_values <- tbus_data$result$values
+
+tbus_clean <- tbus_values %>%
+  lapply(extract_row) %>%
+  bind_rows()
+
+tbus_clean <- tbus_clean %>%
+  mutate(
+    szer_geo = as.numeric(szer_geo),
+    dlug_geo = as.numeric(dlug_geo)
+  )
+
+feature_list <- metro_data$result$featureMemberList
+
+coordinates <- feature_list$geometry$coordinates %>%
+  bind_rows() %>%
+  rename(latitude = latitude, longitude = longitude)
+
+properties <- feature_list$properties %>%
+  bind_rows() %>%
+  rename(OBJECTID = value)
+
+metro_df <- cbind(coordinates, properties)
+
+metro_df <- metro_df %>%
+  mutate(transport_type = "M")
+
+tbus_clean <- tbus_clean %>%
+  mutate(transport_type = "T/B") %>%
+  mutate(szer_geo = as.numeric(szer_geo),
+         dlug_geo = as.numeric(dlug_geo))
+
+metro_df <- metro_df %>%
+  mutate(latitude = as.numeric(latitude),
+         longitude = as.numeric(longitude))
+
+public_transport <- bind_rows(
+  tbus_clean %>% select(latitude = szer_geo, longitude = dlug_geo, transport_type),
+  metro_df %>% select(latitude, longitude, transport_type)
+)
+```
+
+To analyze the spatial distribution of public transport points, clustering is performed. Points within a 500-meter radius are grouped into clusters, and centroids are calculated for each cluster. The weight of each centroid is determined by the number of points in its cluster.
+
+```{r}
+public_transport_sf <- st_as_sf(public_transport, coords = c("longitude", "latitude"), crs = 4326)
+public_transport_sf <- st_transform(public_transport_sf, crs = 32633)
+
+distance_matrix <- st_distance(public_transport_sf)
+radius <- 500
+clusters <- list()
+
+for (i in 1:nrow(public_transport_sf)) {
+  nearby_points <- which(as.numeric(distance_matrix[i, ]) <= radius)
+  clusters[[i]] <- nearby_points
+}
+
+clusters <- unique(clusters)
+
+centroids <- lapply(clusters, function(cluster_indices) {
+  cluster_points <- public_transport_sf[cluster_indices, ]
+  centroid <- st_centroid(st_union(cluster_points))
+  return(centroid)
+})
+
+centroids <- do.call(c, centroids)
+centroids <- st_as_sf(centroids)
+cluster_counts <- sapply(clusters, length)
+centroids$weight <- cluster_counts
+```
+
+The property data is filtered to include only listings in Warsaw. A function is created to calculate the minimum distance from each property to the nearest public transport point and identify the type of transport.
+
+```{r}
+properties_warsaw <- properties1 %>%
+  filter(city == "warszawa")
+
+calculate_min_distance_and_type <- function(prop_lat, prop_lon, transport_df) {
+  distances <- distHaversine(
+    c(prop_lon, prop_lat),
+    transport_df %>% select(longitude, latitude)
+  )
+  min_index <- which.min(distances)
+  list(
+    min_distance = min(distances),
+    transport_type = transport_df$transport_type[min_index]
+  )
+}
+
+properties_warsaw <- properties_warsaw %>%
+  rowwise() %>%
+  mutate(
+    min_distance = calculate_min_distance_and_type(latitude, longitude, public_transport)$min_distance,
+    nearest_transport_type = calculate_min_distance_and_type(latitude, longitude, public_transport)$transport_type
+  ) %>%
+  ungroup()
+```
+
+To better capture the accessibility of properties to public transport, centroid-based scores are calculated. These scores incorporate both the distance to the nearest centroid and the weight of the centroid, reflecting the density of transport points in the area. They are calculated as centroid weight divided by distance from property + 1. The 1 serves as a measure to prevent rapid score explosion, and thereby bias.
+
+```{r}
+centroids_sf <- st_as_sf(centroids, coords = c("longitude", "latitude"), crs = 32633)
+centroids_sf <- st_transform(centroids_sf, crs = 4326)
+centroids_coords <- st_coordinates(centroids_sf)
+
+centroids <- centroids %>%
+  mutate(
+    longitude = centroids_coords[, "X"],
+    latitude = centroids_coords[, "Y"]
+  ) %>%
+  st_drop_geometry()
+
+calculate_centroid_score <- function(prop_lat, prop_lon, centroids_df) {
+  distances <- distHaversine(
+    c(prop_lon, prop_lat),
+    centroids_df %>% select(longitude, latitude)
+  )
+  scores <- centroids_df$weight / (distances + 1)
+  max_score_index <- which.max(scores)
+  list(
+    centroid_score = max(scores),
+    centroid_distance = distances[max_score_index],
+    centroid_weight = centroids_df$weight[max_score_index]
+  )
+}
+
+properties_warsaw <- properties_warsaw %>%
+  rowwise() %>%
+  mutate(
+    centroid_score = calculate_centroid_score(latitude, longitude, centroids)$centroid_score,
+    centroid_distance = calculate_centroid_score(latitude, longitude, centroids)$centroid_distance,
+    centroid_weight = calculate_centroid_score(latitude, longitude, centroids)$centroid_weight
+  ) %>%
+  ungroup()
+```
 
 ## Exploratory data analysis
 
