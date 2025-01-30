@@ -74,6 +74,57 @@ public_transport <- bind_rows(
   metro_df %>% select(latitude, longitude, transport_type)
 )
 
+
+######clustering
+# Convert the dataframe to an sf object
+public_transport_sf <- st_as_sf(public_transport, coords = c("longitude", "latitude"), crs = 4326)
+
+# Transform to a projected coordinate system (e.g., UTM) for accurate distance measurements
+public_transport_sf <- st_transform(public_transport_sf, crs = 32633)  # UTM zone 33N
+
+# Calculate the distance matrix (in meters)
+distance_matrix <- st_distance(public_transport_sf)
+
+
+# Define the radius (500 meters)
+radius <- 500
+
+# Initialize a list to store cluster assignments
+clusters <- list()
+
+# Loop through each point and find nearby points
+for (i in 1:nrow(public_transport_sf)) {
+  nearby_points <- which(as.numeric(distance_matrix[i, ]) <= radius)
+  clusters[[i]] <- nearby_points
+}
+
+# Remove duplicate clusters (optional, if you want unique clusters)
+clusters <- unique(clusters)
+
+
+# Calculate centroids for each cluster
+centroids <- lapply(clusters, function(cluster_indices) {
+  cluster_points <- public_transport_sf[cluster_indices, ]
+  centroid <- st_centroid(st_union(cluster_points))
+  return(centroid)
+})
+
+# Combine centroids into a single sf object
+centroids <- do.call(c, centroids)
+centroids <- st_as_sf(centroids)
+
+# Count the number of points in each cluster
+cluster_counts <- sapply(clusters, length)
+
+# Add weights to the centroids
+centroids$weight <- cluster_counts
+
+
+###################
+
+
+
+
 properties_warsaw <- properties1 %>%
   filter(city == "warszawa")
 
@@ -101,6 +152,57 @@ properties_warsaw <- properties_warsaw %>%
   ) %>%
   ungroup()
 
+
+
+##########applying the same to centroids
+# Convert the centroids dataframe to an sf object
+centroids_sf <- st_as_sf(centroids, coords = c("longitude", "latitude"), crs = 32633)  # Assuming UTM zone 33N
+
+centroids_sf <- st_transform(centroids_sf, crs = 4326)
+
+centroids_coords <- st_coordinates(centroids_sf)
+
+centroids <- centroids %>%
+  mutate(
+    longitude = centroids_coords[, "X"],
+    latitude = centroids_coords[, "Y"]
+  )
+
+centroids <- centroids %>%
+  st_drop_geometry()
+
+# Function to calculate the centroid-based score
+calculate_centroid_score <- function(prop_lat, prop_lon, centroids_df) {
+  # Calculate distances to all centroids
+  distances <- distHaversine(
+    c(prop_lon, prop_lat),
+    centroids_df %>% select(longitude, latitude)
+  )
+  
+  # Calculate scores using the formula: weight / (distance + 1)
+  scores <- centroids_df$weight / (distances + 1)
+  
+  # Find the maximum score (best centroid)
+  max_score_index <- which.max(scores)
+  
+  # Return the maximum score, corresponding distance, and centroid weight
+  list(
+    centroid_score = max(scores),  # Best score
+    centroid_distance = distances[max_score_index],  # Distance to the best centroid
+    centroid_weight = centroids_df$weight[max_score_index]  # Weight of the best centroid
+  )
+}
+
+properties_warsaw <- properties_warsaw %>%
+  rowwise() %>%
+  mutate(
+    centroid_score = calculate_centroid_score(latitude, longitude, centroids)$centroid_score,
+    centroid_distance = calculate_centroid_score(latitude, longitude, centroids)$centroid_distance,
+    centroid_weight = calculate_centroid_score(latitude, longitude, centroids)$centroid_weight
+  ) %>%
+  ungroup()
+
+
 ### it is here that i noticed - there are other distances in the dataset such as pharmacy distance or post office distance or centre distance - thats great! we can use that also
 ## but for now i will focus on just the transport
 
@@ -124,7 +226,7 @@ print(paste("Correlation between distance and price:", correlation)) #there is *
 library(corrplot)
 cor(properties_warsaw[is.numeric(properties_warsaw)])
 
-model <- lm(price ~ min_distance + squareMeters, data = properties_warsaw) #significant model, it does kind prove our thesis as is
+model <- lm(price/squareMeters ~ min_distance + centroid_score, data = properties_warsaw) #significant model, it does kind prove our thesis as is
 summary(model)
 # but lets improve this. If you have any ideas, feel free to share!
 
