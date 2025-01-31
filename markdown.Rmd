@@ -88,6 +88,11 @@ properties1 <- read.csv('apartments_pl_2024_06.csv') #apartment prices with geol
 The first step involves loading and cleaning the public transport data, including bus/tram stops and metro stations. The data is transformed into a consistent format for further analysis.
 
 ```{r}
+extract_row <- function(row) {
+  row %>%
+    pivot_wider(names_from = key, values_from = value)
+}
+
 tbus_values <- tbus_data$result$values
 
 tbus_clean <- tbus_values %>%
@@ -226,6 +231,117 @@ properties_warsaw <- properties_warsaw %>%
 
 ## Exploratory data analysis
 
+```{r}
+warsaw_bbox <- st_bbox(warsaw_districts)
+zoom_out_factor <- 1.05
+expanded_bbox <- warsaw_bbox * c(1/zoom_out_factor, 1/zoom_out_factor, zoom_out_factor, zoom_out_factor)
+
+tm_shape(warsaw_districts, bbox = expanded_bbox) +  
+  tm_polygons(col = "lightgray", border.col = "white") +  
+  tm_shape(public_transport_sf) +  
+  tm_dots(col = "transport_type", palette = "Set1", size = 0.06, legend.show = FALSE) +  
+  tm_layout(main.title = "Public Transport Points in Warsaw")
+
+centroids_sf <- st_as_sf(centroids, coords = c("longitude", "latitude"), crs = 4326)
+centroids_sf <- st_transform(centroids_sf, crs = st_crs(warsaw_districts))
+
+ggplot() +
+  geom_sf(data = warsaw_districts, fill = "lightgray", color = "black") +  
+  geom_sf(data = centroids_sf, aes(size = weight), color = "red", alpha = 0.6) +  # Plot centroids
+  scale_size_continuous(range = c(0.05, 3)) +  # Adjust the size of the centroids
+  labs(title = "Cluster Centroids in Warsaw",
+       size = "Centroid Weight") +
+  theme_minimal()
+
+
+```
+```{r}
+properties_warsaw_sf <- st_as_sf(properties_warsaw, coords = c("longitude", "latitude"), crs = 4326)
+
+properties_warsaw_sf <- st_transform(properties_warsaw_sf, crs = st_crs(warsaw_districts))
+
+ggplot() +
+  geom_sf(data = warsaw_districts, fill = "lightgray", color = "white") +  
+  geom_sf(data = properties_warsaw_sf, aes(color = price), size = 1, alpha = 0.6) +  
+  scale_color_viridis_c(
+    option = "plasma", 
+    name = "Price", 
+    breaks = seq(0, 3000000, by = 1000000)  
+  ) +
+  labs(title = "Properties in Warsaw Colored by Price",
+       subtitle = "Overlay on Warsaw Districts",
+       caption = "Data: properties_warsaw") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+By visually examining property prices, we can note that they are related to proximity to the city center. The Wawer district also presents some high prices, likely stemming from its emptiness, enabling investors to construct bigger properties.
+
+```{r}
+ggplot() +
+  geom_sf(data = warsaw_districts, fill = "lightgray", color = "white") +  # Warsaw districts
+  geom_sf(
+    data = properties_warsaw_sf, 
+    aes(
+      color = centroid_score, 
+      size = centroid_score,  
+      alpha = centroid_score  
+    )
+  ) +
+  scale_color_viridis_c(
+    option = "plasma",  
+    name = "Centroid Score", 
+    rescaler = ~ scales::rescale_mid(.x, mid = median(properties_warsaw_sf$centroid_score))  # Emphasize higher values
+  ) +
+  scale_size_continuous(
+    range = c(0.5, 3),  # Size range for points (smaller to larger)
+    guide = "none"  # Hide size legend to avoid clutter
+  ) +
+  scale_alpha_continuous(
+    range = c(0.3, 1),  # Alpha range (more transparent to more opaque)
+    guide = "none"  # Hide alpha legend to avoid clutter
+  ) +
+  labs(
+    title = "Properties in Warsaw Colored by Centroid Score",
+    subtitle = "Higher scores are more visible",
+    caption = "Data: properties_warsaw"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+```{r}
+properties_with_districts <- st_join(properties_warsaw_sf, warsaw_districts)
+# Calculate average centroid score by district
+avg_centroid_by_district <- properties_with_districts %>%
+  group_by(nazwa_dzie) %>%  # Replace `district_name` with the actual column name for district names
+  summarise(avg_centroid_score = mean(centroid_score, na.rm = TRUE)) %>%
+  ungroup()
+# Join average scores back to the districts shapefile
+warsaw_districts_with_avg <- warsaw_districts %>%
+  st_join(avg_centroid_by_district, by = "nazwa_dzie")  # Replace `district_name` with the actual column name
+
+ggplot() +
+  geom_sf(
+    data = warsaw_districts_with_avg, 
+    aes(fill = avg_centroid_score),  # Fill districts by average centroid score
+    color = "white",  # District boundaries
+    size = 0.2
+  ) +
+  scale_fill_viridis_c(
+    option = "plasma",  # Use a high-contrast color scale
+    name = "Avg. Centroid Score", 
+    na.value = "lightgray"  # Color for districts with no data
+  ) +
+  labs(
+    title = "Average Centroid Score by District in Warsaw",
+    subtitle = "Higher scores indicate better access to public transport",
+    caption = "Data: properties_warsaw"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+Visual examination of the average centroid score by district reveals some surprises. Generally, the scores go lower the further from the city center, with the Ursus district being the exception. Empirically speaking, this district is well connected with buses, with many of them connecting Warsaw with Piastów and Pruszków. Ursus also had some of the most point counts in both centroids and properties, which might also inflate the score. The property counts may stem from massive housing projects in the Szamoty subarea of Ursus (one of the authors grew up in Ursus, hence the insider knowledge).
+
 # Modeling
 
 ## Correlation analysis
@@ -237,4 +353,3 @@ properties_warsaw <- properties_warsaw %>%
 ## Model analysis
 
 #Conclusions
-
