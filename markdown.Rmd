@@ -85,6 +85,45 @@ metro_data <- fromJSON("metro_stops.customization") #same as above
 properties1 <- read.csv('apartments_pl_2024_06.csv') #apartment prices with geolocation
 ```
 
+## Dataset description
+
+```{r}
+head(properties1)
+```
+
+The variables in this dataset can be classified into 5 categories:
+
+General Information:
+* id: Unique identifier for each listing.
+* city: City where the apartment is located. We set this parameter to "warszawa" to indicate that we are only interested in Warsaw.
+* type: Type of apartment (e.g., "blockOfFlats", "apartmentBuilding").
+* ownership: Type of ownership (e.g., "condominium", "cooperative", "udział" (polish for "share")).
+* buildingMaterial: Construction material (e.g., "brick", "concreteSlab"), but has missing values.
+
+Size and Layout:
+* squareMeters: Size of the apartment in square meters. It will be an important factor in modeling, as we intend to divide price with it.
+* rooms: Number of rooms.
+* floor: Floor number (some missing values).
+* floorCount: Total floors in the building.
+* buildYear: Year of construction (some missing values).
+
+Location and Proximity:
+* latitude & longitude: Geographical coordinates. Key factors in our analysis, it is the basis for calculating centroid scores later.
+* centreDistance: Distance from city center. Also an important factor.
+* poiCount: Number of points of interest nearby.
+* Distances to various amenities (all in kilometers, with some missing values): schoolDistance, clinicDistance, postOfficeDistance, kindergartenDistance, restaurantDistance, collegeDistance, pharmacyDistance. They will be important in evaluating centroid score significance in the model.
+
+Features and Condition:
+* condition: Condition of the apartment (e.g., "premium", but many missing values).
+* hasParkingSpace, hasBalcony, hasElevator, hasSecurity, hasStorageRoom: Boolean values (yes/no). 
+
+Pricing:
+* price: Listing price in PLN. One of the most important values in our analysis. 
+
+The code below focuses on working with the geolocational variables to establish centroid scores.
+
+## Feature engineering
+
 The first step involves loading and cleaning the public transport data, including bus/tram stops and metro stations. The data is transformed into a consistent format for further analysis.
 
 ```{r}
@@ -255,6 +294,9 @@ ggplot() +
 
 
 ```
+
+The above graphs illustrate the points on a Warsaw shaped map. Important to note are the transport points not belonging to Warsaw. The city bus service provides tickets for a number of local transporters, encorporating them into their infrastructure. Those points are generaly not considered by us, unless a property in Warsaw lies on the very edge of the city borders, making a centroid outside of the official city bounds the nearest centroid.
+
 ```{r}
 properties_warsaw_sf <- st_as_sf(properties_warsaw, coords = c("longitude", "latitude"), crs = 4326)
 
@@ -275,7 +317,7 @@ ggplot() +
   theme(legend.position = "bottom")
 ```
 
-By visually examining property prices, we can note that they are related to proximity to the city center. The Wawer district also presents some high prices, likely stemming from its emptiness, enabling investors to construct bigger properties.
+By visually examining property prices, we can note that they are related to proximity to the city center. The Wawer district also presents some high prices, likely stemming from its emptiness, enabling investors to construct bigger properties, or even luxury ones.
 
 ```{r}
 ggplot() +
@@ -342,13 +384,30 @@ ggplot() +
 ```
 Visual examination of the average centroid score by district reveals some surprises. Generally, the scores go lower the further from the city center, with the Ursus district being the exception. Empirically speaking, this district is well connected with buses, with many of them connecting Warsaw with Piastów and Pruszków. Ursus also had some of the most point counts in both centroids and properties, which might also inflate the score. The property counts may stem from massive housing projects in the Szamoty subarea of Ursus (one of the authors grew up in Ursus, hence the insider knowledge).
 
+```{r}
+hist(properties_warsaw$price)
+```
+```{r}
+hist(properties_warsaw$squareMeters)
+```
+From the histograms above, we can see that squareMeters and price are similarily distributed, with a long right side tail. This gives us even more reason to combine the two, ensuring a distribution which resembles a normal one.
+
+```{r}
+hist(properties_warsaw$price/properties_warsaw$squareMeters)
+```
+
+```{r}
+plot(density(properties_warsaw$centroid_score), xlim=c(0, 3))
+```
+
+Similarily, the centroid score also exhibits a strong right tail, with most observations falling into the 0 - 0.5 bin. 
+
+
 # Modeling
 
 ## Correlation analysis
 
 ## Component selection
-
-## Feature engineering
 
 ## Model analysis
 
