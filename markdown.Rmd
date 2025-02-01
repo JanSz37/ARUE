@@ -2,45 +2,53 @@
 title: "Hedonic model on property prices and proximity to transport"
 author: "Jan Szczepanek, Anastasia Sviridova"
 date: "2025-01-29"
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
+editor_options:
+  markdown:
+    wrap: sentence
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, message = F, warning = F, out.width="50%")
 ```
 
 # Introduction
 
-The relationship between property prices and proximity to public transport is a well-documented phenomenon in urban studies. Properties located near public transport hubs often command higher prices due to the convenience and accessibility they offer. Understanding this relationship can provide valuable insights for real estate investors, urban planners, and policymakers.
+The relationship between property prices and proximity to public transport is a well-documented phenomenon in urban studies.
+Properties located near public transport hubs often command higher prices due to the convenience and accessibility they offer.
+Understanding this relationship can provide valuable insights for real estate investors, urban planners, and policymakers.
 
-This project aims to explore the correlation between property prices and public transport proximity in Warsaw, Poland. By leveraging spatial data analysis techniques, we will:
+This project aims to explore the correlation between property prices and public transport proximity in Warsaw, Poland.
+By leveraging spatial data analysis techniques, we will:
 
-* Measure Proximity to Public Transport: Calculate the distance from each property to the nearest public transport point.
+-   Measure Proximity to Public Transport: Calculate the distance from each property to the nearest public transport point.
 
-* Evaluate the Impact on Property Prices: Analyze how proximity to public transport influences property prices.
+-   Evaluate the Impact on Property Prices: Analyze how proximity to public transport influences property prices.
 
 ## Our objectives
 
-* Data Collection and Preparation: Gather and preprocess data on property prices and public transport locations in Warsaw.
+-   Data Collection and Preparation: Gather and preprocess data on property prices and public transport locations in Warsaw.
 
-* Proximity Analysis: Calculate the distance from each property to the nearest public transport point.
+-   Proximity Analysis: Calculate the distance from each property to the nearest public transport point.
 
-* Clustering: Extend the distance with public transport point analysis /w weights.
+-   Clustering: Extend the distance with public transport point analysis /w weights.
 
-* Correlation Analysis: Examine the relationship between property prices and public transport proximity.
+-   Correlation Analysis: Examine the relationship between property prices and public transport proximity.
 
-* Modeling: Develop a regression model to examine the relation between the two main factors.
+-   Modeling: Develop a regression model to examine the relation between the two main factors.
 
-* Visualization: Visualize the results to identify patterns and trends.
+-   Visualization: Visualize the results to identify patterns and trends.
 
 ## Data sources
 
 This study uses the following data:
 
-* Apartment Prices in Poland by Krzysztof Jamroz (June 2024) [link on Kaggle](https://www.kaggle.com/datasets/krzysztofjamroz/apartment-prices-in-poland/data)
-* Public Transport Stops from the Otwarte Dane initiative led by the Warsaw City Hall [link to the initative](https://api.um.warszawa.pl/)
-* Metro Station Exits from the Otwarte Dane initiative led by the Warsaw City Hall 
-* Warsaw Districts shape file (we need to find the source or just not use that one)
+-   Apartment Prices in Poland by Krzysztof Jamroz (June 2024) [link on Kaggle](https://www.kaggle.com/datasets/krzysztofjamroz/apartment-prices-in-poland/data)
+-   Public Transport Stops from the Otwarte Dane initiative led by the Warsaw City Hall [link to the initative](https://api.um.warszawa.pl/)
+-   Metro Station Exits from the Otwarte Dane initiative led by the Warsaw City Hall
+-   Warsaw Districts shape file (we need to find the source or just not use that one)
 
 ## Pakcages used
 
@@ -88,43 +96,66 @@ properties1 <- read.csv('apartments_pl_2024_06.csv') #apartment prices with geol
 ## Dataset description
 
 ```{r}
-head(properties1)
+colnames(properties1)
 ```
 
 The variables in this dataset can be classified into 5 categories:
 
 General Information:
-* id: Unique identifier for each listing.
-* city: City where the apartment is located. We set this parameter to "warszawa" to indicate that we are only interested in Warsaw.
-* type: Type of apartment (e.g., "blockOfFlats", "apartmentBuilding").
-* ownership: Type of ownership (e.g., "condominium", "cooperative", "udział" (polish for "share")).
-* buildingMaterial: Construction material (e.g., "brick", "concreteSlab"), but has missing values.
+
+-   id: Unique identifier for each listing.
+
+-   city: City where the apartment is located.
+    We set this parameter to "warszawa" to indicate that we are only interested in Warsaw.
+
+-   type: Type of apartment (e.g., "blockOfFlats", "apartmentBuilding").
+
+-   ownership: Type of ownership (e.g., "condominium", "cooperative", "udział" (polish for "share")).
+
+-   buildingMaterial: Construction material (e.g., "brick", "concreteSlab"), but has missing values.
 
 Size and Layout:
-* squareMeters: Size of the apartment in square meters. It will be an important factor in modeling, as we intend to divide price with it.
-* rooms: Number of rooms.
-* floor: Floor number (some missing values).
-* floorCount: Total floors in the building.
-* buildYear: Year of construction (some missing values).
+
+-   squareMeters: Size of the apartment in square meters.
+    It will be an important factor in modeling, as we intend to divide price with it.
+
+-   rooms: Number of rooms.
+
+-   floor: Floor number (some missing values).
+
+-   floorCount: Total floors in the building.
+
+-   buildYear: Year of construction (some missing values).
 
 Location and Proximity:
-* latitude & longitude: Geographical coordinates. Key factors in our analysis, it is the basis for calculating centroid scores later.
-* centreDistance: Distance from city center. Also an important factor.
-* poiCount: Number of points of interest nearby.
-* Distances to various amenities (all in kilometers, with some missing values): schoolDistance, clinicDistance, postOfficeDistance, kindergartenDistance, restaurantDistance, collegeDistance, pharmacyDistance. They will be important in evaluating centroid score significance in the model.
+
+-   latitude & longitude: Geographical coordinates.
+    Key factors in our analysis, it is the basis for calculating centroid scores later.
+
+-   centreDistance: Distance from city center.
+    Also an important factor.
+
+-   poiCount: Number of points of interest nearby.
+
+-   Distances to various amenities (all in kilometers, with some missing values): schoolDistance, clinicDistance, postOfficeDistance, kindergartenDistance, restaurantDistance, collegeDistance, pharmacyDistance.
+    They will be important in evaluating centroid score significance in the model.
 
 Features and Condition:
-* condition: Condition of the apartment (e.g., "premium", but many missing values).
-* hasParkingSpace, hasBalcony, hasElevator, hasSecurity, hasStorageRoom: Boolean values (yes/no). 
+
+-   condition: Condition of the apartment (e.g., "premium", but many missing values).
+
+-   hasParkingSpace, hasBalcony, hasElevator, hasSecurity, hasStorageRoom: Boolean values (yes/no).
 
 Pricing:
-* price: Listing price in PLN. One of the most important values in our analysis. 
+
+-   price: Listing price in PLN. One of the most important values in our analysis.
 
 The code below focuses on working with the geolocational variables to establish centroid scores.
 
 ## Feature engineering
 
-The first step involves loading and cleaning the public transport data, including bus/tram stops and metro stations. The data is transformed into a consistent format for further analysis.
+The first step involves loading and cleaning the public transport data, including bus/tram stops and metro stations.
+The data is transformed into a consistent format for further analysis.
 
 ```{r}
 extract_row <- function(row) {
@@ -174,7 +205,9 @@ public_transport <- bind_rows(
 )
 ```
 
-To analyze the spatial distribution of public transport points, clustering is performed. Points within a 500-meter radius are grouped into clusters, and centroids are calculated for each cluster. The weight of each centroid is determined by the number of points in its cluster.
+To analyze the spatial distribution of public transport points, clustering is performed.
+Points within a 500-meter radius are grouped into clusters, and centroids are calculated for each cluster.
+The weight of each centroid is determined by the number of points in its cluster.
 
 ```{r}
 public_transport_sf <- st_as_sf(public_transport, coords = c("longitude", "latitude"), crs = 4326)
@@ -203,7 +236,8 @@ cluster_counts <- sapply(clusters, length)
 centroids$weight <- cluster_counts
 ```
 
-The property data is filtered to include only listings in Warsaw. A function is created to calculate the minimum distance from each property to the nearest public transport point and identify the type of transport.
+The property data is filtered to include only listings in Warsaw.
+A function is created to calculate the minimum distance from each property to the nearest public transport point and identify the type of transport.
 
 ```{r}
 properties_warsaw <- properties1 %>%
@@ -230,7 +264,10 @@ properties_warsaw <- properties_warsaw %>%
   ungroup()
 ```
 
-To better capture the accessibility of properties to public transport, centroid-based scores are calculated. These scores incorporate both the distance to the nearest centroid and the weight of the centroid, reflecting the density of transport points in the area. They are calculated as centroid weight divided by distance from property + 1. The 1 serves as a measure to prevent rapid score explosion, and thereby bias.
+To better capture the accessibility of properties to public transport, centroid-based scores are calculated.
+These scores incorporate both the distance to the nearest centroid and the weight of the centroid, reflecting the density of transport points in the area.
+They are calculated as centroid weight divided by distance from property + 1.
+The 1 serves as a measure to prevent rapid score explosion, and thereby bias.
 
 ```{r}
 centroids_sf <- st_as_sf(centroids, coords = c("longitude", "latitude"), crs = 32633)
@@ -295,7 +332,10 @@ ggplot() +
 
 ```
 
-The above graphs illustrate the points on a Warsaw shaped map. Important to note are the transport points not belonging to Warsaw. The city bus service provides tickets for a number of local transporters, encorporating them into their infrastructure. Those points are generaly not considered by us, unless a property in Warsaw lies on the very edge of the city borders, making a centroid outside of the official city bounds the nearest centroid.
+The above graphs illustrate the points on a Warsaw shaped map.
+Important to note are the transport points not belonging to Warsaw.
+The city bus service provides tickets for a number of local transporters, encorporating them into their infrastructure.
+Those points are generaly not considered by us, unless a property in Warsaw lies on the very edge of the city borders, making a centroid outside of the official city bounds the nearest centroid.
 
 ```{r}
 properties_warsaw_sf <- st_as_sf(properties_warsaw, coords = c("longitude", "latitude"), crs = 4326)
@@ -317,11 +357,12 @@ ggplot() +
   theme(legend.position = "bottom")
 ```
 
-By visually examining property prices, we can note that they are related to proximity to the city center. The Wawer district also presents some high prices, likely stemming from its emptiness, enabling investors to construct bigger properties, or even luxury ones.
+By visually examining property prices, we can note that they are related to proximity to the city center.
+The Wawer district also presents some high prices, likely stemming from its emptiness, enabling investors to construct bigger properties, or even luxury ones.
 
 ```{r}
 ggplot() +
-  geom_sf(data = warsaw_districts, fill = "lightgray", color = "white") +  # Warsaw districts
+  geom_sf(data = warsaw_districts, fill = "lightgray", color = "white") + 
   geom_sf(
     data = properties_warsaw_sf, 
     aes(
@@ -333,15 +374,15 @@ ggplot() +
   scale_color_viridis_c(
     option = "plasma",  
     name = "Centroid Score", 
-    rescaler = ~ scales::rescale_mid(.x, mid = median(properties_warsaw_sf$centroid_score))  # Emphasize higher values
+    rescaler = ~ scales::rescale_mid(.x, mid = median(properties_warsaw_sf$centroid_score))  
   ) +
   scale_size_continuous(
-    range = c(0.5, 3),  # Size range for points (smaller to larger)
-    guide = "none"  # Hide size legend to avoid clutter
+    range = c(0.5, 3),  
+    guide = "none" 
   ) +
   scale_alpha_continuous(
-    range = c(0.3, 1),  # Alpha range (more transparent to more opaque)
-    guide = "none"  # Hide alpha legend to avoid clutter
+    range = c(0.3, 1),  
+    guide = "none"  
   ) +
   labs(
     title = "Properties in Warsaw Colored by Centroid Score",
@@ -351,28 +392,27 @@ ggplot() +
   theme_minimal() +
   theme(legend.position = "bottom")
 ```
+
 ```{r}
 properties_with_districts <- st_join(properties_warsaw_sf, warsaw_districts)
-# Calculate average centroid score by district
 avg_centroid_by_district <- properties_with_districts %>%
-  group_by(nazwa_dzie) %>%  # Replace `district_name` with the actual column name for district names
+  group_by(nazwa_dzie) %>%  
   summarise(avg_centroid_score = mean(centroid_score, na.rm = TRUE)) %>%
   ungroup()
-# Join average scores back to the districts shapefile
 warsaw_districts_with_avg <- warsaw_districts %>%
-  st_join(avg_centroid_by_district, by = "nazwa_dzie")  # Replace `district_name` with the actual column name
+  st_join(avg_centroid_by_district, by = "nazwa_dzie")  
 
 ggplot() +
   geom_sf(
     data = warsaw_districts_with_avg, 
-    aes(fill = avg_centroid_score),  # Fill districts by average centroid score
-    color = "white",  # District boundaries
+    aes(fill = avg_centroid_score),  
+    color = "white", 
     size = 0.2
   ) +
   scale_fill_viridis_c(
-    option = "plasma",  # Use a high-contrast color scale
+    option = "plasma", 
     name = "Avg. Centroid Score", 
-    na.value = "lightgray"  # Color for districts with no data
+    na.value = "lightgray"  
   ) +
   labs(
     title = "Average Centroid Score by District in Warsaw",
@@ -382,15 +422,23 @@ ggplot() +
   theme_minimal() +
   theme(legend.position = "bottom")
 ```
-Visual examination of the average centroid score by district reveals some surprises. Generally, the scores go lower the further from the city center, with the Ursus district being the exception. Empirically speaking, this district is well connected with buses, with many of them connecting Warsaw with Piastów and Pruszków. Ursus also had some of the most point counts in both centroids and properties, which might also inflate the score. The property counts may stem from massive housing projects in the Szamoty subarea of Ursus (one of the authors grew up in Ursus, hence the insider knowledge).
+
+Visual examination of the average centroid score by district reveals some surprises.
+Generally, the scores go lower the further from the city center, with the Ursus district being the exception.
+Empirically speaking, this district is well connected with buses, with many of them connecting Warsaw with Piastów and Pruszków.
+Ursus also had some of the most point counts in both centroids and properties, which might also inflate the score.
+The property counts may stem from massive housing projects in the Szamoty subarea of Ursus (one of the authors grew up in Ursus, hence the insider knowledge).
 
 ```{r}
 hist(properties_warsaw$price)
 ```
+
 ```{r}
 hist(properties_warsaw$squareMeters)
 ```
-From the histograms above, we can see that squareMeters and price are similarily distributed, with a long right side tail. This gives us even more reason to combine the two, ensuring a distribution which resembles a normal one.
+
+From the histograms above, we can see that squareMeters and price are similarily distributed, with a long right side tail.
+This gives us even more reason to combine the two, ensuring a distribution which resembles a normal one.
 
 ```{r}
 hist(properties_warsaw$price/properties_warsaw$squareMeters)
@@ -400,8 +448,7 @@ hist(properties_warsaw$price/properties_warsaw$squareMeters)
 plot(density(properties_warsaw$centroid_score), xlim=c(0, 3))
 ```
 
-Similarily, the centroid score also exhibits a strong right tail, with most observations falling into the 0 - 0.5 bin. 
-
+Similarily, the centroid score also exhibits a strong right tail, with most observations falling into the 0 - 0.5 bin.
 
 # Modeling
 
