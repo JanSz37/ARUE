@@ -1,0 +1,732 @@
+---
+title: "Hedonic model on property prices and proximity to transport"
+author: "Jan Szczepanek, Anastasia Sviridova"
+date: "2025-01-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+The relationship between property prices and proximity to public transport is a well-documented phenomenon in urban studies. Properties located near public transport hubs often command higher prices due to the convenience and accessibility they offer. Understanding this relationship can provide valuable insights for real estate investors, urban planners, and policymakers.
+
+This project aims to explore the correlation between property prices and public transport proximity in Warsaw, Poland. By leveraging spatial data analysis techniques, we will:
+
+* Measure Proximity to Public Transport: Calculate the distance from each property to the nearest public transport point.
+
+* Evaluate the Impact on Property Prices: Analyze how proximity to public transport influences property prices.
+
+## Our objectives
+
+* Data Collection and Preparation: Gather and preprocess data on property prices and public transport locations in Warsaw.
+
+* Proximity Analysis: Calculate the distance from each property to the nearest public transport point.
+
+* Clustering: Extend the distance with public transport point analysis /w weights.
+
+* Correlation Analysis: Examine the relationship between property prices and public transport proximity.
+
+* Modeling: Develop a regression model to examine the relation between the two main factors.
+
+* Visualization: Visualize the results to identify patterns and trends.
+
+## Data sources
+
+This study uses the following data:
+
+* Apartment Prices in Poland by Krzysztof Jamroz (June 2024) [link on Kaggle](https://www.kaggle.com/datasets/krzysztofjamroz/apartment-prices-in-poland/data)
+* Public Transport Stops from the Otwarte Dane initiative led by the Warsaw City Hall [link to the initative](https://api.um.warszawa.pl/)
+* Metro Station Exits from the Otwarte Dane initiative led by the Warsaw City Hall 
+* Warsaw Districts shape file (we need to find the source or just not use that one)
+
+## Pakcages used
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+# sf: For handling spatial data and performing geometric operations
+library(sf)
+
+# jsonlite: For reading JSON files (e.g., public transport data)
+library(jsonlite)
+
+# dplyr: For data manipulation and transformation
+library(dplyr)
+
+# ggplot2: For creating visualizations and plots
+library(ggplot2)
+
+# tmap: For thematic mapping and spatial data visualization
+library(tmap)
+
+# tidyr: For reshaping and tidying data
+library(tidyr)
+
+# geosphere: For calculating geographic distances (e.g., Haversine distance)
+library(geosphere)
+
+# corrplot: For visualizing correlation matrices
+library(corrplot)
+
+# gridExtra: For arranging multiple plots in a grid
+library(gridExtra)
+
+# GGally: For creating advanced correlation and scatterplot matrices
+library(GGally)
+
+# lmtest: For statistical hypothesis testing in regression models
+library(lmtest)  
+
+# sandwich: For computing robust standard errors in regression analysis
+library(sandwich)  
+
+# stargazer: For generating formatted regression tables
+library(stargazer)
+
+# spdep: For spatial econometric modeling and Moran's I test
+library(spdep)
+
+# spatialreg: For estimating spatial regression models (SAR, SEM)
+library(spatialreg)
+
+```
+
+# Data preparation
+
+```{r}
+warsaw_districts <- st_read("dzielnice_Warszawy.shp") #for viz
+
+tbus_data <- fromJSON("bus_tram_stops.customization") #self expanatory
+
+metro_data <- fromJSON("metro_stops.customization") #same as above
+
+properties1 <- read.csv('apartments_pl_2024_06.csv') #apartment prices with geolocation
+```
+
+The first step involves loading and cleaning the public transport data, including bus/tram stops and metro stations. The data is transformed into a consistent format for further analysis.
+
+```{r}
+extract_row <- function(row) {
+  row %>%
+    pivot_wider(names_from = key, values_from = value)
+}
+
+tbus_values <- tbus_data$result$values
+
+tbus_clean <- tbus_values %>%
+  lapply(extract_row) %>%
+  bind_rows()
+
+tbus_clean <- tbus_clean %>%
+  mutate(
+    szer_geo = as.numeric(szer_geo),
+    dlug_geo = as.numeric(dlug_geo)
+  )
+
+feature_list <- metro_data$result$featureMemberList
+
+coordinates <- feature_list$geometry$coordinates %>%
+  bind_rows() %>%
+  rename(latitude = latitude, longitude = longitude)
+
+properties <- feature_list$properties %>%
+  bind_rows() %>%
+  rename(OBJECTID = value)
+
+metro_df <- cbind(coordinates, properties)
+
+metro_df <- metro_df %>%
+  mutate(transport_type = "M")
+
+tbus_clean <- tbus_clean %>%
+  mutate(transport_type = "T/B") %>%
+  mutate(szer_geo = as.numeric(szer_geo),
+         dlug_geo = as.numeric(dlug_geo))
+
+metro_df <- metro_df %>%
+  mutate(latitude = as.numeric(latitude),
+         longitude = as.numeric(longitude))
+
+public_transport <- bind_rows(
+  tbus_clean %>% select(latitude = szer_geo, longitude = dlug_geo, transport_type),
+  metro_df %>% select(latitude, longitude, transport_type)
+)
+```
+
+To analyze the spatial distribution of public transport points, clustering is performed. Points within a 500-meter radius are grouped into clusters, and centroids are calculated for each cluster. The weight of each centroid is determined by the number of points in its cluster.
+
+```{r}
+public_transport_sf <- st_as_sf(public_transport, coords = c("longitude", "latitude"), crs = 4326)
+public_transport_sf <- st_transform(public_transport_sf, crs = 32633)
+
+distance_matrix <- st_distance(public_transport_sf)
+radius <- 500
+clusters <- list()
+
+for (i in 1:nrow(public_transport_sf)) {
+  nearby_points <- which(as.numeric(distance_matrix[i, ]) <= radius)
+  clusters[[i]] <- nearby_points
+}
+
+clusters <- unique(clusters)
+
+centroids <- lapply(clusters, function(cluster_indices) {
+  cluster_points <- public_transport_sf[cluster_indices, ]
+  centroid <- st_centroid(st_union(cluster_points))
+  return(centroid)
+})
+
+centroids <- do.call(c, centroids)
+centroids <- st_as_sf(centroids)
+cluster_counts <- sapply(clusters, length)
+centroids$weight <- cluster_counts
+```
+
+The property data is filtered to include only listings in Warsaw. A function is created to calculate the minimum distance from each property to the nearest public transport point and identify the type of transport.
+
+```{r}
+properties_warsaw <- properties1 %>%
+  filter(city == "warszawa")
+
+calculate_min_distance_and_type <- function(prop_lat, prop_lon, transport_df) {
+  distances <- distHaversine(
+    c(prop_lon, prop_lat),
+    transport_df %>% select(longitude, latitude)
+  )
+  min_index <- which.min(distances)
+  list(
+    min_distance = min(distances),
+    transport_type = transport_df$transport_type[min_index]
+  )
+}
+
+properties_warsaw <- properties_warsaw %>%
+  rowwise() %>%
+  mutate(
+    min_distance = calculate_min_distance_and_type(latitude, longitude, public_transport)$min_distance,
+    nearest_transport_type = calculate_min_distance_and_type(latitude, longitude, public_transport)$transport_type
+  ) %>%
+  ungroup()
+```
+
+To better capture the accessibility of properties to public transport, centroid-based scores are calculated. These scores incorporate both the distance to the nearest centroid and the weight of the centroid, reflecting the density of transport points in the area. They are calculated as centroid weight divided by distance from property + 1. The 1 serves as a measure to prevent rapid score explosion, and thereby bias.
+
+```{r}
+centroids_sf <- st_as_sf(centroids, coords = c("longitude", "latitude"), crs = 32633)
+centroids_sf <- st_transform(centroids_sf, crs = 4326)
+centroids_coords <- st_coordinates(centroids_sf)
+
+centroids <- centroids %>%
+  mutate(
+    longitude = centroids_coords[, "X"],
+    latitude = centroids_coords[, "Y"]
+  ) %>%
+  st_drop_geometry()
+
+calculate_centroid_score <- function(prop_lat, prop_lon, centroids_df) {
+  distances <- distHaversine(
+    c(prop_lon, prop_lat),
+    centroids_df %>% select(longitude, latitude)
+  )
+  scores <- centroids_df$weight / (distances + 1)
+  max_score_index <- which.max(scores)
+  list(
+    centroid_score = max(scores),
+    centroid_distance = distances[max_score_index],
+    centroid_weight = centroids_df$weight[max_score_index]
+  )
+}
+
+properties_warsaw <- properties_warsaw %>%
+  rowwise() %>%
+  mutate(
+    centroid_score = calculate_centroid_score(latitude, longitude, centroids)$centroid_score,
+    centroid_distance = calculate_centroid_score(latitude, longitude, centroids)$centroid_distance,
+    centroid_weight = calculate_centroid_score(latitude, longitude, centroids)$centroid_weight
+  ) %>%
+  ungroup()
+```
+
+## Exploratory data analysis
+
+```{r}
+warsaw_bbox <- st_bbox(warsaw_districts)
+zoom_out_factor <- 1.05
+expanded_bbox <- warsaw_bbox * c(1/zoom_out_factor, 1/zoom_out_factor, zoom_out_factor, zoom_out_factor)
+
+tm_shape(warsaw_districts, bbox = expanded_bbox) +  
+  tm_polygons(col = "lightgray", border.col = "white") +  
+  tm_shape(public_transport_sf) +  
+  tm_dots(col = "transport_type", palette = "Set1", size = 0.06, legend.show = FALSE) +  
+  tm_layout(main.title = "Public Transport Points in Warsaw")
+
+centroids_sf <- st_as_sf(centroids, coords = c("longitude", "latitude"), crs = 4326)
+centroids_sf <- st_transform(centroids_sf, crs = st_crs(warsaw_districts))
+
+ggplot() +
+  geom_sf(data = warsaw_districts, fill = "lightgray", color = "black") +  
+  geom_sf(data = centroids_sf, aes(size = weight), color = "red", alpha = 0.6) +  # Plot centroids
+  scale_size_continuous(range = c(0.05, 3)) +  # Adjust the size of the centroids
+  labs(title = "Cluster Centroids in Warsaw",
+       size = "Centroid Weight") +
+  theme_minimal()
+
+
+```
+```{r}
+properties_warsaw_sf <- st_as_sf(properties_warsaw, coords = c("longitude", "latitude"), crs = 4326)
+
+properties_warsaw_sf <- st_transform(properties_warsaw_sf, crs = st_crs(warsaw_districts))
+
+ggplot() +
+  geom_sf(data = warsaw_districts, fill = "lightgray", color = "white") +  
+  geom_sf(data = properties_warsaw_sf, aes(color = price), size = 1, alpha = 0.6) +  
+  scale_color_viridis_c(
+    option = "plasma", 
+    name = "Price", 
+    breaks = seq(0, 3000000, by = 1000000)  
+  ) +
+  labs(title = "Properties in Warsaw Colored by Price",
+       subtitle = "Overlay on Warsaw Districts",
+       caption = "Data: properties_warsaw") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+By visually examining property prices, we can note that they are related to proximity to the city center. The Wawer district also presents some high prices, likely stemming from its emptiness, enabling investors to construct bigger properties.
+
+```{r}
+ggplot() +
+  geom_sf(data = warsaw_districts, fill = "lightgray", color = "white") +  # Warsaw districts
+  geom_sf(
+    data = properties_warsaw_sf, 
+    aes(
+      color = centroid_score, 
+      size = centroid_score,  
+      alpha = centroid_score  
+    )
+  ) +
+  scale_color_viridis_c(
+    option = "plasma",  
+    name = "Centroid Score", 
+    rescaler = ~ scales::rescale_mid(.x, mid = median(properties_warsaw_sf$centroid_score))  # Emphasize higher values
+  ) +
+  scale_size_continuous(
+    range = c(0.5, 3),  # Size range for points (smaller to larger)
+    guide = "none"  # Hide size legend to avoid clutter
+  ) +
+  scale_alpha_continuous(
+    range = c(0.3, 1),  # Alpha range (more transparent to more opaque)
+    guide = "none"  # Hide alpha legend to avoid clutter
+  ) +
+  labs(
+    title = "Properties in Warsaw Colored by Centroid Score",
+    subtitle = "Higher scores are more visible",
+    caption = "Data: properties_warsaw"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+```{r}
+properties_with_districts <- st_join(properties_warsaw_sf, warsaw_districts)
+# Calculate average centroid score by district
+avg_centroid_by_district <- properties_with_districts %>%
+  group_by(nazwa_dzie) %>%  # Replace `district_name` with the actual column name for district names
+  summarise(avg_centroid_score = mean(centroid_score, na.rm = TRUE)) %>%
+  ungroup()
+# Join average scores back to the districts shapefile
+warsaw_districts_with_avg <- warsaw_districts %>%
+  st_join(avg_centroid_by_district, by = "nazwa_dzie")  # Replace `district_name` with the actual column name
+
+ggplot() +
+  geom_sf(
+    data = warsaw_districts_with_avg, 
+    aes(fill = avg_centroid_score),  # Fill districts by average centroid score
+    color = "white",  # District boundaries
+    size = 0.2
+  ) +
+  scale_fill_viridis_c(
+    option = "plasma",  # Use a high-contrast color scale
+    name = "Avg. Centroid Score", 
+    na.value = "lightgray"  # Color for districts with no data
+  ) +
+  labs(
+    title = "Average Centroid Score by District in Warsaw",
+    subtitle = "Higher scores indicate better access to public transport",
+    caption = "Data: properties_warsaw"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+Visual examination of the average centroid score by district reveals some surprises. Generally, the scores go lower the further from the city center, with the Ursus district being the exception. Empirically speaking, this district is well connected with buses, with many of them connecting Warsaw with Piastów and Pruszków. Ursus also had some of the most point counts in both centroids and properties, which might also inflate the score. The property counts may stem from massive housing projects in the Szamoty subarea of Ursus (one of the authors grew up in Ursus, hence the insider knowledge).
+
+```{r}
+# Count properties per district
+properties_per_district <- properties_warsaw_sf %>%
+  st_join(warsaw_districts) %>%
+  group_by(nazwa_dzie) %>%
+  summarise(property_count = n()) %>%
+  st_drop_geometry()
+
+# Calculate area of each district in square kilometers
+districts_with_area <- warsaw_districts %>%
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1000000)
+
+# Join counts with districts and calculate density
+districts_with_density <- districts_with_area %>%
+  left_join(properties_per_district, by = "nazwa_dzie") %>%
+  mutate(density = property_count / area_km2)
+
+# Create the map
+ggplot(districts_with_density) +
+  geom_sf(aes(fill = density), color = "white") +
+  scale_fill_viridis_c(
+    name = "Properties per km²",
+    option = "plasma",
+    direction = -1
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Property Density in Warsaw Districts",
+    subtitle = "Number of properties per square kilometer"
+  ) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.text = element_text(size = 8)
+  )
+```
+
+The map illustrates the spatial distribution of property density across Warsaw’s districts. Central districts exhibit the **highest property density**, as indicated by the dark purple shades, while peripheral areas display significantly lower density. This pattern aligns with urban development trends, where **housing supply is concentrated near the city center**, reflecting higher demand and accessibility to key amenities.
+
+
+
+## Correlation Analysis: Property Prices and Accessibility
+
+Firstly, we remove NA values for the accessibility variables.
+
+```{r}
+properties_warsaw <- properties_warsaw %>%
+  mutate(across(where(is.character), ~ ifelse(. == "", NA, .)))
+
+# Remove rows where any of the specified columns have NA values
+properties_warsaw <- properties_warsaw %>%
+  filter(!is.na(clinicDistance) & 
+         !is.na(postOfficeDistance) & 
+         !is.na(kindergartenDistance) & 
+         !is.na(restaurantDistance) & 
+         !is.na(collegeDistance) & 
+         !is.na(pharmacyDistance))
+
+properties_warsaw <- properties_warsaw %>%
+  drop_na(clinicDistance, postOfficeDistance, kindergartenDistance, 
+          restaurantDistance, collegeDistance, pharmacyDistance)
+
+# Check if missing values still exist
+colSums(is.na(properties_warsaw))
+```
+
+
+Let's explore the effect of min distance to Nearest Public Transport (meters) on Property Price.
+
+```{r}
+ggplot(properties_warsaw, aes(x = min_distance, y = price/squareMeters)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Property Prices vs. Distance to Public Transport",
+       subtitle = "Effect of Transport Accessibility on Price per Square Meter",
+       x = "Distance (min) to Nearest Public Transport (meters)",
+       y = "Property Price") +
+  theme_minimal()
+
+correlation <- cor(properties_warsaw$min_distance, as.numeric(properties_warsaw$price)/properties_warsaw$squareMeters, method = "pearson")
+print(paste("Correlation between distance and price:", correlation))
+```
+
+A visible trend suggests that properties closer to public transport hubs tend to have higher prices per square meter. However, the distribution is quite dense, indicating that while accessibility is an important factor, other variables also significantly influence pricing. The presence of some outliers suggests further investigation into high-priced properties that deviate from the general trend.
+
+Let's explore the effect of center distance on Property Price.
+
+```{r}
+ggplot(properties_warsaw, aes(x = centreDistance, y = price/squareMeters)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Property Prices vs. Distance to Center",
+       subtitle = "Effect of Center Distance on Price per Square Meter",
+       x = "Center Distance",
+       y = "Property Price") +
+  theme_minimal()
+
+
+correlation <- cor(properties_warsaw$centreDistance, as.numeric(properties_warsaw$price)/properties_warsaw$squareMeters, method = "pearson")
+print(paste("Correlation between Centre Distance and price:", correlation))
+
+```
+The scatter plot demonstrates a clear negative relationship between property prices and distance from the city center. Properties located closer to the center tend to have higher prices per square meter, while those farther away show a decline in price. This pattern aligns with the expectation that central locations offer greater accessibility and amenities, making them more desirable and expensive. 
+
+Correlation Matrix for Property Prices and Accessibility
+
+```{r}
+
+selected_vars <- properties_warsaw %>%
+  select(price_per_m2 = price/squareMeters, centreDistance, min_distance, 
+         centroid_score, restaurantDistance, clinicDistance, 
+         postOfficeDistance, kindergartenDistance, pharmacyDistance) %>%
+  drop_na()
+
+cor_matrix <- cor(selected_vars, use = "pairwise.complete.obs", method = "pearson")
+
+# Correlation matrix (heatmap)
+corrplot(cor_matrix, method = "color", type = "upper", 
+         order = "hclust", addCoef.col = "black", tl.col = "black",
+         tl.srt = 45, number.cex = 0.8, tl.cex = 0.8)
+```
+Scatter plots with correlation matrix for Property Prices and Accessibility
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+selected_vars <- selected_vars %>%
+  mutate(across(everything(), as.numeric))
+
+set.seed(123)  
+selected_sample <- selected_vars %>% sample_n(min(500, nrow(selected_vars)))
+
+# Correlation graphs
+ggpairs(selected_sample, 
+        lower = list(continuous = wrap("smooth", method = "lm", color = "red")),
+        upper = list(continuous = wrap("cor", method = "pearson", size = 4)),
+        diag = list(continuous = wrap("densityDiag", alpha = 0.5))) +
+  theme_minimal()
+
+```
+
+The correlation matrix and scatter plots above explore the relationships between **property prices (price_per_m2)** and key accessibility factors such as **distance to the city center, public transport, and urban amenities**.
+
+###  Property Prices & Location
+- **Negative correlation between centreDistance and price_per_m2** suggests that properties further from the city center are generally cheaper.
+- **Weak negative correlation between min_distance and price_per_m2**, meaning proximity to public transport alone is not a strong price determinant.
+
+### Urban Amenities
+- **restaurantDistance and clinicDistance** are negatively correlated with prices, indicating that closer proximity to these amenities increases property value.
+- **postOfficeDistance, kindergartenDistance, and pharmacyDistance show weaker correlations**, suggesting mixed effects on pricing.
+
+### Interdependencies
+- **High correlations exist between urban amenities** (e.g., **restaurantDistance and clinicDistance**), indicating that well-serviced areas cluster multiple amenities.
+- **centroid_score has a weak correlation with price**.
+
+## Implications
+- **Price gradients confirm spatial dependencies**, making **quadratic models** relevant for capturing non-linear effects.
+- **Urban amenities influence pricing**, reinforcing the **importance of walkability and access to services**.
+- **Public transport proximity alone is insufficient to explain price variation**, requiring additional locational and socio-economic factors.
+
+
+## Modeling and Analysis Results
+
+### **Model 1: Baseline Model**
+- **Findings:** All variables except are significant. **CentreDistance** negatively impacts price, while proximity to amenities (restaurants, clinics, post offices, kindergartens, pharmacies) plays a crucial role.
+- **Limitation:** Linear assumption might not fully capture price trends.
+
+```{r}
+lm_linear_raw <- lm(price/squareMeters ~ centreDistance + min_distance + centroid_score + 
+                      restaurantDistance + clinicDistance + postOfficeDistance + 
+                      kindergartenDistance + pharmacyDistance, data = properties_warsaw)
+lm_linear <- coeftest(lm_linear_raw, vcov = vcovHC(lm_linear_raw, type = "HC1"))
+
+lm_linear
+```
+### **Model 2: Quadratic Centre Distance**
+- **Adds:** CentreDistance² to capture non-linearity.
+- **Findings:** The quadratic term is significant (**p < 0.01**), confirming a nonlinear relationship between price and distance from the center.
+- **Improvement:** Higher **R² (0.273)** compared to Model 1 (0.248), indicating a better fit.
+
+```{r}
+properties_warsaw <- properties_warsaw %>%
+  mutate(centreDistance_2 = centreDistance^2)
+
+lm_quad_raw <- lm(price/squareMeters ~ centreDistance + centreDistance_2 + min_distance + centroid_score+
+                    restaurantDistance + clinicDistance + postOfficeDistance + 
+                    kindergartenDistance + pharmacyDistance, data = properties_warsaw)
+lm_quad <- coeftest(lm_quad_raw, vcov = vcovHC(lm_quad_raw, type = "HC1"))
+lm_quad
+```
+Based on the significant results, we removed centroid_score.
+
+### **Model 3: Adding Geographic Coordinates**
+- **Includes:** Latitude and longitude.
+- **Findings:** **Latitude is highly significant and negative**, suggesting a strong north-south price gradient. Longitude is insignificant.
+- **Interpretation:** Geographic trends improve the model's explanatory power (**R² = 0.303**).
+
+```{r}
+lm_coord_raw <- lm(price/squareMeters ~ centreDistance + centreDistance_2 + min_distance + 
+                     restaurantDistance + clinicDistance + postOfficeDistance + 
+                     kindergartenDistance + pharmacyDistance + 
+                     longitude + latitude, 
+                   data = properties_warsaw)
+lm_coord <- coeftest(lm_coord_raw, vcov = vcovHC(lm_coord_raw, type = "HC1"))
+lm_coord
+```
+
+### **Model 4: Final Model (Best Choice)**
+- **Removes:** Longitude (insignificant).
+- **Findings:** Latitude remains highly significant, confirming its role in spatial price distribution.
+- **Best Fit:** This model has the highest **R² (0.303)** and provides the most meaningful interpretation.
+
+```{r}
+lm_lat_raw <- lm(price/squareMeters ~ centreDistance + centreDistance_2 + min_distance + 
+                   restaurantDistance + clinicDistance + postOfficeDistance + 
+                   kindergartenDistance + pharmacyDistance + latitude, 
+                 data = properties_warsaw)
+lm_lat <- coeftest(lm_lat_raw, vcov = vcovHC(lm_lat_raw, type = "HC1"))
+lm_lat
+```
+
+Comparison of all models
+
+```{r, message=FALSE, warning=FALSE}
+results <- stargazer(
+  lm_linear_raw, lm_quad_raw, lm_coord_raw, lm_lat_raw,
+  se = list(
+    sqrt(diag(vcovHC(lm_linear_raw, type="HC1"))),
+    sqrt(diag(vcovHC(lm_quad_raw, type="HC1"))),
+    sqrt(diag(vcovHC(lm_coord_raw, type="HC1"))),
+    sqrt(diag(vcovHC(lm_lat_raw, type="HC1")))
+  ),
+  title = "Regression Output: Impact of Various Distances on Price per m²",
+  type = "text", 
+  star.cutoffs = c(0.10, 0.05, 0.01)
+)
+```
+
+### **Final Model Selection**
+- **Best Model:** **Model 4**, as it balances explanatory power and interpretability.
+
+### **Impact of Various Distances on Property Prices**
+
+#### **1. Centre Distance (centreDistance & centreDistance²)**
+- **Negative impact**: Properties farther from the city center tend to have lower prices.
+- **Quadratic effect**: The rate of price decline slows as distance increases (Model 2+).
+- **Key takeaway**: Nonlinear effect confirmed, with distance being a critical factor.
+
+#### **2️. Minimum Distance to Public Transport**
+- **Positive impact**: Properties closer to public transport have higher prices.
+- **Stable effect**: Remains significant across all models, showing transport accessibility is valuable.
+
+#### **3. Centroid Score**
+- **Initially positive (Model 1)** but loses significance in later models.
+- **Interpretation**: Its effect is absorbed by other distance factors, making it redundant.
+
+#### **4️. Restaurant Distance**
+- **Strong negative impact**: Further distance from restaurants decreases property value.
+- **Consistent effect**: Remains highly significant, highlighting the importance of local amenities.
+
+#### **5️. Clinic Distance**
+- **Negative impact**: Closer properties to clinics tend to have higher prices.
+- **Weaker effect** compared to restaurants but remains significant.
+
+#### **6️. Post Office Distance**
+- **Positive impact**: Unexpectedly, further distance correlates with higher prices.
+- **Possible reason**: Post offices might be located in less premium areas.
+
+#### **7️. Kindergarten Distance**
+- **Positive coefficient**: Suggests that properties located further from kindergartens tend to have **higher prices**.  
+- **Possible explanation**: High-priced residential areas may have fewer public kindergartens, as they are often concentrated in more affordable, family-oriented neighborhoods.  
+
+#### **8️. Pharmacy Distance**
+- **Positive coefficient**: Indicates that greater distance from pharmacies is associated with **higher property prices**.  
+- **Possible reason**: Pharmacies are typically located in **high-density, mixed-use urban areas**, where property prices may be relatively lower compared to premium residential districts.
+
+
+**Centre distance & transport accessibility** - Key drivers of price variation.
+**Proximity to restaurants and clinics** - Increases property value.
+**Proximity to kindergartens, pharmacies and post offices does not necessarily increase property value** - in fact, higher-end residential areas might have fewer of these amenities.
+
+Therefore, amenities play a crucial role, and the **nonlinear city center effect is essential** for price modeling.
+
+
+## **Spatial Autocorrelation Test (Moran’s I)**
+- Used to **detect spatial dependency** in property prices.
+- Ensures that prices are not randomly distributed but influenced by nearby locations.
+- A significant **Moran’s I** confirms the need for spatial models.
+
+```{r}
+# Before running spatial models, we check if property prices cluster geographically.
+properties_warsaw <- properties_warsaw %>%
+  distinct(longitude, latitude, .keep_all = TRUE)
+
+# Create spatial coordinates
+coords <- cbind(properties_warsaw$longitude, properties_warsaw$latitude)
+
+# Define spatial neighbors based on the 4 nearest properties
+neighbors <- knn2nb(knearneigh(coords, k = 15))
+
+# Convert neighbors into spatial weights
+weights <- nb2listw(neighbors, style = "W")
+
+# Moran's I test for spatial autocorrelation
+moran_test <- moran.test(properties_warsaw$price / properties_warsaw$squareMeters, listw = weights)
+print(moran_test)
+
+```
+### **Moran’s I Statistic: 0.4917 (p-value < 2.2e-16)**
+- Indicates **strong positive spatial correlation** in property prices.
+- Prices are **not randomly distributed** but influenced by location.
+
+Spatial dependency confirms the **need for spatial regression models** (e.g., SEM).
+
+
+## **Spatial Error Model (SEM)**
+- Controls for **spatially correlated errors** that may bias traditional regression models.
+- Accounts for unobserved factors that affect price but are **spatially dependent**.
+- Helps correct the spatial clustering effects.
+
+```{r}
+spatial_model_sem <- errorsarlm(price/squareMeters ~ min_distance +centroid_score+ centreDistance + 
+                                   restaurantDistance + clinicDistance + 
+                                  postOfficeDistance+ kindergartenDistance+ pharmacyDistance, 
+                                data = properties_warsaw, listw = weights)
+
+summary(spatial_model_sem)
+```
+
+
+The Spatial Error Model (SEM) accounts for spatial dependence in property prices, correcting biases from OLS. A **high Lambda (0.731, p < 2.2e-16)** confirms strong spatial autocorrelation, making SEM a better fit than a standard linear model.
+
+## **Key Insights**
+- **Centre Distance** and **Restaurant Distance** remain significant, reinforcing the importance of proximity to central areas and dining options.
+- **Centroid Score** becomes significant and negative.
+- **Kindergarten Distance** is now insignificant, suggesting its influence is weaker than expected.
+
+SEM produces **similar results to OLS**, but accounts for spatial effects, refining variable significance.
+
+
+
+## **Conclusions**
+
+This study examined the relationship between **property prices** and **proximity to public transport** and **urban amenities** in Warsaw, using spatial and econometric analysis.
+
+### **Key Findings**
+- **Proximity to the City Center Matters**  
+  - Properties closer to the city center have **higher prices**, with a **nonlinear decline** in value as distance increases.
+  
+- **Public Transport Accessibility is Important**  
+  - Properties near **public transport hubs** tend to have **higher prices**, confirming the economic benefits of accessibility.
+
+- **Urban Amenities Influence Prices**  
+  - **Restaurants and clinics** positively impact prices, while **proximity to kindergartens, post offices, and pharmacies does not necessarily increase property values**.
+
+- **Spatial Dependence is Significant**  
+  - **Moran’s I test confirmed strong spatial autocorrelation**, justifying the use of **spatial econometric models**.
+
+Understanding spatial dependencies is essential for accurate **property valuation** and **urban planning**.
+
+
+# Sources
+
+1. **Lecture Materials by Professor Andrea Caragliu**: *Applied Regional and Urban Economics*
+
+2. **ArcGIS Pro Documentation**: *"How Spatial Autocorrelation (Global Moran's I) works."*  
+   [ArcGIS Pro - Moran's I](https://pro.arcgis.com/en/pro-app/latest/tool-reference/spatial-statistics/h-how-spatial-autocorrelation-moran-s-i-spatial-st.htm)
+
+3. **Crime Mapping in R**: *"Chapter 9: Spatial regression models."*  
+   [Crime Mapping Textbook](https://maczokni.github.io/crime_mapping_textbook/spatial-regression-models.html)
+
+
+
