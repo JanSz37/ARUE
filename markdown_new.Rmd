@@ -605,7 +605,7 @@ results <- stargazer(
 - **Quadratic effect**: The rate of price decline slows as distance increases (Model 2+).
 - **Key takeaway**: Nonlinear effect confirmed, with distance being a critical factor.
 
-#### **2️. Minimum Distance to Public Transport**
+#### **2. Minimum Distance to Public Transport**
 - **Positive impact**: Properties closer to public transport have higher prices.
 - **Stable effect**: Remains significant across all models, showing transport accessibility is valuable.
 
@@ -613,23 +613,23 @@ results <- stargazer(
 - **Initially positive (Model 1)** but loses significance in later models.
 - **Interpretation**: Its effect is absorbed by other distance factors, making it redundant.
 
-#### **4️. Restaurant Distance**
+#### **4. Restaurant Distance**
 - **Strong negative impact**: Further distance from restaurants decreases property value.
 - **Consistent effect**: Remains highly significant, highlighting the importance of local amenities.
 
-#### **5️. Clinic Distance**
+#### **5. Clinic Distance**
 - **Negative impact**: Closer properties to clinics tend to have higher prices.
 - **Weaker effect** compared to restaurants but remains significant.
 
-#### **6️. Post Office Distance**
+#### **6. Post Office Distance**
 - **Positive impact**: Unexpectedly, further distance correlates with higher prices.
 - **Possible reason**: Post offices might be located in less premium areas.
 
-#### **7️. Kindergarten Distance**
+#### **7. Kindergarten Distance**
 - **Positive coefficient**: Suggests that properties located further from kindergartens tend to have **higher prices**.  
 - **Possible explanation**: High-priced residential areas may have fewer public kindergartens, as they are often concentrated in more affordable, family-oriented neighborhoods.  
 
-#### **8️. Pharmacy Distance**
+#### **8. Pharmacy Distance**
 - **Positive coefficient**: Indicates that greater distance from pharmacies is associated with **higher property prices**.  
 - **Possible reason**: Pharmacies are typically located in **high-density, mixed-use urban areas**, where property prices may be relatively lower compared to premium residential districts.
 
